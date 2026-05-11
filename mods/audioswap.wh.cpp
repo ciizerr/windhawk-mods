@@ -2,7 +2,7 @@
 // @id              audioswap
 // @name            AudioSwap
 // @description     Adds a tray icon to instantly toggle between two preferred audio outputs.
-// @version         1.0
+// @version         1.1.1
 // @author          BlackPaw
 // @github          https://github.com/BlackPaw21
 // @include         windhawk.exe
@@ -11,40 +11,68 @@
 
 // ==WindhawkModReadme==
 /*
-# Audio Output Switcher
-A lightning-fast audio toggle right in your taskbar! 🎧🔊
+# AudioSwap
+Instantly toggle between two audio output devices from your system tray — no diving into Sound settings.
 
-## 📖 How to Use It
-1. ⚙️ **Configure Your Devices:** Go to the **Settings** tab. 
-   - Type the Name of your device names (e.g., "Headphones" and "Speakers").
-   - Select an icon for each device from the dropdown menus.
-2. 🔍 **Find the Icon:** Look in your system tray. The icon will change based on which device is currently active!
-3. 🎯 **Click to Toggle:** A single click swaps your audio and updates the icon instantly.
+---
+
+## How to Use
+
+1. **Choose Icons** — Open the **Settings** tab and pick an icon for each of your two devices.
+2. **Select Your Devices** — Right-click the tray icon. Use **Set as Device 1** and **Set as Device 2** to assign your outputs from the live device list.
+3. **Toggle** — Left-click the tray icon at any time to swap between the two devices instantly.
+
+> The tray tooltip always shows the active device. On first run it will read *"Right-click to configure"* until both devices are assigned.
+
+---
+
+## Changelog
+
+### v1.1.0
+- **New:** Can now open WindHawk directly from the icon using right click
+- **New:** Added new icons to select from
+- **Improved:** added icons in the right click menu
+
+### v1.1.0
+- **New:** Right-click context menu — auto-detects all active audio outputs and lets you assign Device 1 and Device 2 directly from a live list. No more typing device names manually.
+- **New:** Device selections persist across restarts.
+- **Improved:** Toggle now matches devices by their unique system ID instead of a name substring search — works correctly regardless of how Windows names your device.
+- **Improved:** Tray tooltip prompts you to configure on first run instead of showing "Unknown Device".
+- **Removed:** Device name text fields from the Settings tab (replaced by the right-click menu).
+
+### v1.0.1
+- Initial release.
 */
 // ==/WindhawkModReadme==
 
 // ==WindhawkModSettings==
 /*
-- device1: "Headphones"
-  $name: First Audio Device Name
-  $description: Name of the first device's name.
-- icon1: headphones1
+- icon1: speaker_normal
   $name: First Device Icon
   $options:
-    - headphones1: Headphones (normal)
-    - headphones2: Modern Headset (white)
-    - speaker1: Basic Speaker (normal)
-    - speaker2: Modern Speaker (white)
-- device2: "Speakers"
-  $name: Second Audio Device Name
-  $description: Name of the second device's name.
-- icon2: speaker1
+    - speaker_normal: Normal Speaker
+    - speaker_square: Square Speaker
+    - speaker_modern: Modern Speaker
+    - speaker_modern_square: Modern Square Speaker
+    - audio_wave: Audio Wave
+    - headphones: Headphones
+    - headset_gaming: Gaming Headset
+    - headphones_modern: Modern Headphones
+    - headset_modern: Modern Gaming Headset
+    - earphones: Earphones
+- icon2: speaker_square
   $name: Second Device Icon
   $options:
-    - headphones1: Headphones (normal)
-    - headphones2: Modern Headset (white)
-    - speaker1: Basic Speaker (normal)
-    - speaker2: Modern Speaker (white)
+    - speaker_normal: Normal Speaker
+    - speaker_square: Square Speaker
+    - speaker_modern: Modern Speaker
+    - speaker_modern_square: Modern Square Speaker
+    - audio_wave: Audio Wave
+    - headphones: Headphones
+    - headset_gaming: Gaming Headset
+    - headphones_modern: Modern Headphones
+    - headset_modern: Modern Gaming Headset
+    - earphones: Earphones
 */
 // ==/WindhawkModSettings==
 
@@ -63,22 +91,33 @@ A lightning-fast audio toggle right in your taskbar! 🎧🔊
 #define TRAY_ICON_ID 1
 #define WM_TRAY_CALLBACK (WM_USER + 1)
 #define WM_UPDATE_TRAY_STATE (WM_USER + 2)
+#define MENU_DEVICE1_BASE 1000
+#define MENU_DEVICE2_BASE 2000
+#define MENU_OPEN_WINDHAWK 3000
+#define MENU_MAX_DEVICES  32
 
 const DWORD CLICK_DEBOUNCE_MS = 500;
 
 static volatile LONG g_isProcessingClick = 0;
 static HANDLE g_trayThread = nullptr;
-static HANDLE g_workerThread = nullptr; // Track worker thread
+static HANDLE g_workerThread = nullptr;
 static HWND g_trayHwnd = nullptr;
 static HINSTANCE g_hInstance = nullptr;
-static HICON g_iconDev1 = nullptr; 
-static HICON g_iconDev2 = nullptr; 
+static WCHAR g_windhawkPath[MAX_PATH] = {0};
+static HICON g_hWindHawkIcon = nullptr;
+static HBITMAP g_hWindHawkBmp = nullptr;
+static HICON g_iconDev1 = nullptr;
+static HBITMAP g_hIconDev1Bmp = nullptr;
+static HICON g_iconDev2 = nullptr;
+static HBITMAP g_hIconDev2Bmp = nullptr;
 static DWORD g_lastClickTime = 0;
 static UINT g_taskbarCreatedMsg = 0;
 
-// Cached settings
-static WCHAR g_cachedDev1[256] = {0};
-static WCHAR g_cachedDev2[256] = {0};
+// Cached device selections (loaded from Windhawk storage)
+static WCHAR g_cachedDev1Id[512]   = {0};
+static WCHAR g_cachedDev1Name[256] = {0};
+static WCHAR g_cachedDev2Id[512]   = {0};
+static WCHAR g_cachedDev2Name[256] = {0};
 
 const CLSID CLSID_CPolicyConfigClient = {
     0x870af99c, 0x171d, 0x4f9e, {0xaf, 0x0d, 0xe6, 0x3d, 0xf4, 0x0c, 0x2b, 0xc9}
@@ -107,17 +146,51 @@ public:
 
 int GetIconIndex(PCWSTR iconSetting) {
     if (iconSetting) {
-        if (wcscmp(iconSetting, L"headphones1") == 0) return 2;
-        if (wcscmp(iconSetting, L"headphones2") == 0) return 91;
-        if (wcscmp(iconSetting, L"speaker1") == 0) return 4;
-        if (wcscmp(iconSetting, L"speaker2") == 0) return 93;
+        if (wcscmp(iconSetting, L"speaker_normal") == 0) return 1;
+        if (wcscmp(iconSetting, L"speaker_square") == 0) return 4;
+        if (wcscmp(iconSetting, L"speaker_modern") == 0) return 90;
+        if (wcscmp(iconSetting, L"speaker_modern_square") == 0) return 93;
+        if (wcscmp(iconSetting, L"audio_wave") == 0) return 94;
+        if (wcscmp(iconSetting, L"headphones") == 0) return 2;
+        if (wcscmp(iconSetting, L"headset_gaming") == 0) return 8;
+        if (wcscmp(iconSetting, L"headphones_modern") == 0) return 91;
+        if (wcscmp(iconSetting, L"headset_modern") == 0) return 95;
+        if (wcscmp(iconSetting, L"earphones") == 0) return 6;
     }
     return 4;
+}
+
+void LoadDeviceSelections() {
+    g_cachedDev1Id[0] = g_cachedDev1Name[0] = L'\0';
+    g_cachedDev2Id[0] = g_cachedDev2Name[0] = L'\0';
+
+    Wh_GetStringValue(L"Device1Id",   g_cachedDev1Id,   ARRAYSIZE(g_cachedDev1Id));
+    Wh_GetStringValue(L"Device1Name", g_cachedDev1Name, ARRAYSIZE(g_cachedDev1Name));
+    Wh_GetStringValue(L"Device2Id",   g_cachedDev2Id,   ARRAYSIZE(g_cachedDev2Id));
+    Wh_GetStringValue(L"Device2Name", g_cachedDev2Name, ARRAYSIZE(g_cachedDev2Name));
+}
+
+void SaveDeviceSelection(int slot, PCWSTR deviceId, PCWSTR friendlyName) {
+    if (slot == 1) {
+        Wh_SetStringValue(L"Device1Id",   deviceId);
+        Wh_SetStringValue(L"Device1Name", friendlyName);
+        lstrcpynW(g_cachedDev1Id,   deviceId,     512);
+        lstrcpynW(g_cachedDev1Name, friendlyName, 256);
+    } else {
+        Wh_SetStringValue(L"Device2Id",   deviceId);
+        Wh_SetStringValue(L"Device2Name", friendlyName);
+        lstrcpynW(g_cachedDev2Id,   deviceId,     512);
+        lstrcpynW(g_cachedDev2Name, friendlyName, 256);
+    }
 }
 
 void LoadUserIconsAndSettings() {
     if (g_iconDev1) DestroyIcon(g_iconDev1);
     if (g_iconDev2) DestroyIcon(g_iconDev2);
+    if (g_hIconDev1Bmp) DeleteObject(g_hIconDev1Bmp);
+    if (g_hIconDev2Bmp) DeleteObject(g_hIconDev2Bmp);
+    g_hIconDev1Bmp = nullptr;
+    g_hIconDev2Bmp = nullptr;
 
     PCWSTR s1 = Wh_GetStringSetting(L"icon1");
     PCWSTR s2 = Wh_GetStringSetting(L"icon2");
@@ -125,36 +198,55 @@ void LoadUserIconsAndSettings() {
     ExtractIconExW(L"ddores.dll", GetIconIndex(s1), nullptr, &g_iconDev1, 1);
     ExtractIconExW(L"ddores.dll", GetIconIndex(s2), nullptr, &g_iconDev2, 1);
 
+    if (g_iconDev1) {
+        ICONINFO iconInfo = {0};
+        if (GetIconInfo(g_iconDev1, &iconInfo)) {
+            g_hIconDev1Bmp = iconInfo.hbmColor;
+            if (!g_hIconDev1Bmp) {
+                g_hIconDev1Bmp = iconInfo.hbmMask;
+            } else if (iconInfo.hbmMask) {
+                DeleteObject(iconInfo.hbmMask);
+            }
+        }
+    }
+
+    if (g_iconDev2) {
+        ICONINFO iconInfo = {0};
+        if (GetIconInfo(g_iconDev2, &iconInfo)) {
+            g_hIconDev2Bmp = iconInfo.hbmColor;
+            if (!g_hIconDev2Bmp) {
+                g_hIconDev2Bmp = iconInfo.hbmMask;
+            } else if (iconInfo.hbmMask) {
+                DeleteObject(iconInfo.hbmMask);
+            }
+        }
+    }
+
     if (s1) Wh_FreeStringSetting(s1);
     if (s2) Wh_FreeStringSetting(s2);
-
-    PCWSTR rawDev1 = Wh_GetStringSetting(L"device1");
-    PCWSTR rawDev2 = Wh_GetStringSetting(L"device2");
-    if (rawDev1) {
-        lstrcpynW(g_cachedDev1, rawDev1, 256);
-        Wh_FreeStringSetting(rawDev1);
-    }
-    if (rawDev2) {
-        lstrcpynW(g_cachedDev2, rawDev2, 256);
-        Wh_FreeStringSetting(rawDev2);
-    }
 }
 
 void UpdateTrayTip(HWND hWnd, BOOL isAdd) {
     WCHAR currentDev[256] = L"Unknown Device";
-    HICON currentIcon = g_iconDev1; 
-    
-    IMMDeviceEnumerator *pEnum = nullptr;
-    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&pEnum))) {
-        IMMDevice *pDefaultDevice = nullptr;
+    WCHAR currentId[512]  = {0};
+    HICON currentIcon = g_iconDev1;
+
+    IMMDeviceEnumerator* pEnum = nullptr;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                   __uuidof(IMMDeviceEnumerator), (void**)&pEnum))) {
+        IMMDevice* pDefaultDevice = nullptr;
         if (SUCCEEDED(pEnum->GetDefaultAudioEndpoint(eRender, eMultimedia, &pDefaultDevice))) {
-            IPropertyStore *pStore = nullptr;
+            LPWSTR pId = nullptr;
+            if (SUCCEEDED(pDefaultDevice->GetId(&pId))) {
+                lstrcpynW(currentId, pId, 512);
+                CoTaskMemFree(pId);
+            }
+            IPropertyStore* pStore = nullptr;
             if (SUCCEEDED(pDefaultDevice->OpenPropertyStore(STGM_READ, &pStore))) {
                 PROPVARIANT varName;
                 PropVariantInit(&varName);
-                if (SUCCEEDED(pStore->GetValue(PKEY_Device_FriendlyName, &varName)) && varName.pwszVal) {
+                if (SUCCEEDED(pStore->GetValue(PKEY_Device_FriendlyName, &varName)) && varName.pwszVal)
                     lstrcpynW(currentDev, varName.pwszVal, 256);
-                }
                 PropVariantClear(&varName);
                 pStore->Release();
             }
@@ -162,16 +254,18 @@ void UpdateTrayTip(HWND hWnd, BOOL isAdd) {
         }
         pEnum->Release();
     }
-    
-    if (StrStrIW(currentDev, g_cachedDev1)) currentIcon = g_iconDev1;
-    else if (StrStrIW(currentDev, g_cachedDev2)) currentIcon = g_iconDev2;
 
-    // FIX: CPU Optimization - Only redraw the shell icon if data actually changed
+    // ID-based icon selection — exact match, no fuzzy strings
+    if (g_cachedDev1Id[0] != L'\0' && wcscmp(currentId, g_cachedDev1Id) == 0)
+        currentIcon = g_iconDev1;
+    else if (g_cachedDev2Id[0] != L'\0' && wcscmp(currentId, g_cachedDev2Id) == 0)
+        currentIcon = g_iconDev2;
+
+    // CPU opt: skip redraw if nothing changed
     static WCHAR s_lastDev[256] = {0};
     static HICON s_lastIcon = nullptr;
-    if (!isAdd && wcscmp(currentDev, s_lastDev) == 0 && currentIcon == s_lastIcon) {
-        return; 
-    }
+    if (!isAdd && wcscmp(currentDev, s_lastDev) == 0 && currentIcon == s_lastIcon)
+        return;
     lstrcpyW(s_lastDev, currentDev);
     s_lastIcon = currentIcon;
 
@@ -180,64 +274,210 @@ void UpdateTrayTip(HWND hWnd, BOOL isAdd) {
     nid.uID = TRAY_ICON_ID;
     nid.uFlags = NIF_MESSAGE | NIF_TIP | NIF_ICON;
     nid.uCallbackMessage = WM_TRAY_CALLBACK;
-    swprintf_s(nid.szTip, L"Audio: %s", currentDev);
+
+    if (g_cachedDev1Id[0] == L'\0' || g_cachedDev2Id[0] == L'\0')
+        swprintf_s(nid.szTip, L"AudioSwap: Right-click to configure");
+    else
+        swprintf_s(nid.szTip, L"Audio: %s", currentDev);
+
     nid.hIcon = currentIcon;
-    
     Shell_NotifyIconW(isAdd ? NIM_ADD : NIM_MODIFY, &nid);
 }
 
 BOOL ToggleAudioDevice() {
+    // Guard: no-op if devices not configured yet
+    if (g_cachedDev1Id[0] == L'\0' || g_cachedDev2Id[0] == L'\0') {
+        return FALSE;
+    }
+
     CoInitialize(nullptr);
-    IMMDeviceEnumerator *pEnum = nullptr;
-    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&pEnum))) {
+    IMMDeviceEnumerator* pEnum = nullptr;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                __uuidof(IMMDeviceEnumerator), (void**)&pEnum))) {
         CoUninitialize(); return FALSE;
     }
 
-    IMMDevice *pDefaultDevice = nullptr;
+    IMMDevice* pDefaultDevice = nullptr;
     if (FAILED(pEnum->GetDefaultAudioEndpoint(eRender, eMultimedia, &pDefaultDevice))) {
         pEnum->Release(); CoUninitialize(); return FALSE;
     }
 
-    IPropertyStore *pStore = nullptr;
-    pDefaultDevice->OpenPropertyStore(STGM_READ, &pStore);
-    PROPVARIANT varName; PropVariantInit(&varName);
-    pStore->GetValue(PKEY_Device_FriendlyName, &varName);
-
-    BOOL isDev1Active = (varName.pwszVal && StrStrIW(varName.pwszVal, g_cachedDev1));
-    PropVariantClear(&varName); pStore->Release(); pDefaultDevice->Release();
-
-    PCWSTR targetStr = isDev1Active ? g_cachedDev2 : g_cachedDev1;
-    IMMDeviceCollection *pDevices = nullptr;
-    pEnum->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &pDevices);
-    UINT count = 0; pDevices->GetCount(&count);
-
-    LPWSTR targetId = nullptr;
-    for (UINT i = 0; i < count; i++) {
-        IMMDevice *pDevice = nullptr;
-        pDevices->Item(i, &pDevice);
-        pDevice->OpenPropertyStore(STGM_READ, &pStore);
-        PropVariantInit(&varName);
-        pStore->GetValue(PKEY_Device_FriendlyName, &varName);
-        if (varName.pwszVal && StrStrIW(varName.pwszVal, targetStr)) {
-            pDevice->GetId(&targetId);
-            PropVariantClear(&varName); pStore->Release(); pDevice->Release();
-            break;
-        }
-        PropVariantClear(&varName); pStore->Release(); pDevice->Release();
+    LPWSTR currentId = nullptr;
+    HRESULT hr = pDefaultDevice->GetId(&currentId);
+    pDefaultDevice->Release();
+    if (FAILED(hr) || !currentId) {
+        pEnum->Release(); CoUninitialize(); return FALSE;
     }
 
-    if (targetId) {
-        IPolicyConfig *pPolicyConfig = nullptr;
-        if (SUCCEEDED(CoCreateInstance(CLSID_CPolicyConfigClient, nullptr, CLSCTX_ALL, IID_IPolicyConfig_Win10_11, (void**)&pPolicyConfig))) {
-            pPolicyConfig->SetDefaultEndpoint(targetId, eConsole);
-            pPolicyConfig->SetDefaultEndpoint(targetId, eMultimedia);
-            pPolicyConfig->SetDefaultEndpoint(targetId, eCommunications);
-            pPolicyConfig->Release();
-        }
-        CoTaskMemFree(targetId);
+    // Pick the other device by comparing IDs directly — no fuzzy name search
+    PCWSTR targetId = (wcscmp(currentId, g_cachedDev1Id) == 0)
+                      ? g_cachedDev2Id
+                      : g_cachedDev1Id;
+
+    if (!targetId || !targetId[0]) {
+        CoTaskMemFree(currentId);
+        pEnum->Release(); CoUninitialize(); return FALSE;
     }
-    pDevices->Release(); pEnum->Release(); CoUninitialize();
+
+    if (currentId) CoTaskMemFree(currentId);
+
+    IPolicyConfig* pPolicyConfig = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_CPolicyConfigClient, nullptr, CLSCTX_ALL,
+                                   IID_IPolicyConfig_Win10_11, (void**)&pPolicyConfig))) {
+        pPolicyConfig->SetDefaultEndpoint(targetId, eConsole);
+        pPolicyConfig->SetDefaultEndpoint(targetId, eMultimedia);
+        pPolicyConfig->SetDefaultEndpoint(targetId, eCommunications);
+        pPolicyConfig->Release();
+    }
+
+    pEnum->Release();
+    CoUninitialize();
     return TRUE;
+}
+
+struct AudioDevice {
+    WCHAR id[512];
+    WCHAR name[256];
+};
+
+void BuildAndShowContextMenu(HWND hWnd) {
+    AudioDevice devices[MENU_MAX_DEVICES];
+    int deviceCount = 0;
+
+    // Enumerate active render endpoints (COM already init on tray thread)
+    IMMDeviceEnumerator* pEnum = nullptr;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                   __uuidof(IMMDeviceEnumerator), (void**)&pEnum))) {
+        IMMDeviceCollection* pDevices = nullptr;
+        if (SUCCEEDED(pEnum->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &pDevices))) {
+            UINT count = 0;
+            pDevices->GetCount(&count);
+            if (count > MENU_MAX_DEVICES) count = MENU_MAX_DEVICES;
+
+            for (UINT i = 0; i < count; i++) {
+                IMMDevice* pDevice = nullptr;
+                if (FAILED(pDevices->Item(i, &pDevice))) continue;
+
+                LPWSTR pId = nullptr;
+                if (SUCCEEDED(pDevice->GetId(&pId))) {
+                    lstrcpynW(devices[deviceCount].id, pId, 512);
+                    CoTaskMemFree(pId);
+
+                    IPropertyStore* pStore = nullptr;
+                    if (SUCCEEDED(pDevice->OpenPropertyStore(STGM_READ, &pStore))) {
+                        PROPVARIANT varName;
+                        PropVariantInit(&varName);
+                        if (SUCCEEDED(pStore->GetValue(PKEY_Device_FriendlyName, &varName)) && varName.pwszVal) {
+                            lstrcpynW(devices[deviceCount].name, varName.pwszVal, 256);
+                            deviceCount++;
+                        }
+                        PropVariantClear(&varName);
+                        pStore->Release();
+                    }
+                }
+                pDevice->Release();
+            }
+            pDevices->Release();
+        }
+        pEnum->Release();
+    }
+
+    // Build submenus
+    HMENU hSub1 = CreatePopupMenu();
+    HMENU hSub2 = CreatePopupMenu();
+
+    for (int i = 0; i < deviceCount; i++) {
+        UINT flags1 = MF_STRING | (wcscmp(devices[i].id, g_cachedDev1Id) == 0 ? MF_CHECKED : 0);
+        UINT flags2 = MF_STRING | (wcscmp(devices[i].id, g_cachedDev2Id) == 0 ? MF_CHECKED : 0);
+        AppendMenuW(hSub1, flags1, MENU_DEVICE1_BASE + i, devices[i].name);
+        AppendMenuW(hSub2, flags2, MENU_DEVICE2_BASE + i, devices[i].name);
+    }
+
+    // Assemble root menu
+    HMENU hMenu = CreatePopupMenu();
+
+    // Set as Device 1 with icon
+    MENUITEMINFOW mii1 = {sizeof(mii1)};
+    mii1.fMask = MIIM_SUBMENU | MIIM_STRING | MIIM_BITMAP;
+    mii1.hSubMenu = hSub1;
+    mii1.dwTypeData = (LPWSTR)L"Set as Device 1";
+    mii1.hbmpItem = g_hIconDev1Bmp;
+    InsertMenuItemW(hMenu, (UINT)-1, TRUE, &mii1);
+
+    // Set as Device 2 with icon
+    MENUITEMINFOW mii2 = {sizeof(mii2)};
+    mii2.fMask = MIIM_SUBMENU | MIIM_STRING | MIIM_BITMAP;
+    mii2.hSubMenu = hSub2;
+    mii2.dwTypeData = (LPWSTR)L"Set as Device 2";
+    mii2.hbmpItem = g_hIconDev2Bmp;
+    InsertMenuItemW(hMenu, (UINT)-1, TRUE, &mii2);
+
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+
+    // Open WindHawk menu item with icon
+    MENUITEMINFOW mii = {sizeof(mii)};
+    mii.fMask = MIIM_ID | MIIM_STRING | MIIM_BITMAP;
+    mii.wID = MENU_OPEN_WINDHAWK;
+    mii.dwTypeData = (LPWSTR)L"Open WindHawk";
+    mii.hbmpItem = g_hWindHawkBmp;
+    InsertMenuItemW(hMenu, (UINT)-1, TRUE, &mii);
+
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+
+    // Status line — get current active device name
+    WCHAR statusText[300];
+    if (g_cachedDev1Id[0] == L'\0' || g_cachedDev2Id[0] == L'\0') {
+        lstrcpyW(statusText, L"Right-click to configure devices");
+    } else {
+        WCHAR activeName[256] = L"Unknown";
+        IMMDeviceEnumerator* pEnum2 = nullptr;
+        if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                       __uuidof(IMMDeviceEnumerator), (void**)&pEnum2))) {
+            IMMDevice* pDefault = nullptr;
+            if (SUCCEEDED(pEnum2->GetDefaultAudioEndpoint(eRender, eMultimedia, &pDefault))) {
+                IPropertyStore* pStore = nullptr;
+                if (SUCCEEDED(pDefault->OpenPropertyStore(STGM_READ, &pStore))) {
+                    PROPVARIANT v; PropVariantInit(&v);
+                    if (SUCCEEDED(pStore->GetValue(PKEY_Device_FriendlyName, &v)) && v.pwszVal)
+                        lstrcpynW(activeName, v.pwszVal, 256);
+                    PropVariantClear(&v);
+                    pStore->Release();
+                }
+                pDefault->Release();
+            }
+            pEnum2->Release();
+        }
+        swprintf_s(statusText, L"Active: %s", activeName);
+    }
+    AppendMenuW(hMenu, MF_STRING | MF_GRAYED, 0, statusText);
+
+    // Show menu at cursor
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(hWnd);
+    int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RIGHTALIGN,
+                             pt.x, pt.y, 0, hWnd, nullptr);
+    PostMessageW(hWnd, WM_NULL, 0, 0); // flush menu
+
+    DestroyMenu(hMenu); // also destroys attached submenus
+
+    // Handle selection
+    if (cmd >= MENU_DEVICE1_BASE && cmd < MENU_DEVICE1_BASE + deviceCount) {
+        int idx = cmd - MENU_DEVICE1_BASE;
+        SaveDeviceSelection(1, devices[idx].id, devices[idx].name);
+        PostMessageW(hWnd, WM_UPDATE_TRAY_STATE, 0, 0);
+    } else if (cmd >= MENU_DEVICE2_BASE && cmd < MENU_DEVICE2_BASE + deviceCount) {
+        int idx = cmd - MENU_DEVICE2_BASE;
+        SaveDeviceSelection(2, devices[idx].id, devices[idx].name);
+        PostMessageW(hWnd, WM_UPDATE_TRAY_STATE, 0, 0);
+    } else if (cmd == MENU_OPEN_WINDHAWK) {
+        SHELLEXECUTEINFOW sei;
+        ZeroMemory(&sei, sizeof(sei));
+        sei.cbSize = sizeof(sei);
+        sei.lpFile = g_windhawkPath;
+        sei.nShow = SW_SHOWNORMAL;
+        ShellExecuteExW(&sei);
+    }
 }
 
 DWORD WINAPI WorkerThreadProc(LPVOID lpParam) {
@@ -249,7 +489,9 @@ DWORD WINAPI WorkerThreadProc(LPVOID lpParam) {
 }
 
 LRESULT CALLBACK TrayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-        if (msg == WM_TRAY_CALLBACK && lParam == WM_LBUTTONUP) {
+    if (msg == WM_TRAY_CALLBACK && lParam == WM_RBUTTONUP) {
+        BuildAndShowContextMenu(hWnd);
+    } else if (msg == WM_TRAY_CALLBACK && lParam == WM_LBUTTONUP) {
         if (InterlockedExchange(&g_isProcessingClick, 1) == 0) {
             DWORD now = GetTickCount();
             if (now - g_lastClickTime > CLICK_DEBOUNCE_MS) { // Corrected check
@@ -298,13 +540,30 @@ DWORD WINAPI TrayThreadProc(LPVOID) {
 BOOL WhTool_ModInit() {
     Wh_Log(L"AudioSwap Mod Init");
     g_hInstance = GetModuleHandle(nullptr);
+    GetModuleFileName(nullptr, g_windhawkPath, ARRAYSIZE(g_windhawkPath));
+    ExtractIconExW(L"ddores.dll", 98, nullptr, &g_hWindHawkIcon, 1);
+    if (!g_hWindHawkIcon) ExtractIconExW(L"ddores.dll", 94, nullptr, &g_hWindHawkIcon, 1);
+    if (!g_hWindHawkIcon) ExtractIconExW(L"ddores.dll", 95, nullptr, &g_hWindHawkIcon, 1);
+    if (!g_hWindHawkIcon) ExtractIconExW(L"ddores.dll", 6, nullptr, &g_hWindHawkIcon, 1);
+    if (g_hWindHawkIcon) {
+        ICONINFO iconInfo = {0};
+        GetIconInfo(g_hWindHawkIcon, &iconInfo);
+        g_hWindHawkBmp = iconInfo.hbmColor;
+        if (!g_hWindHawkBmp) {
+            g_hWindHawkBmp = iconInfo.hbmMask;
+        } else if (iconInfo.hbmMask) {
+            DeleteObject(iconInfo.hbmMask);
+        }
+    }
     LoadUserIconsAndSettings();
+    LoadDeviceSelections();
     g_trayThread = CreateThread(nullptr, 0, TrayThreadProc, nullptr, 0, nullptr);
     return TRUE;
 }
 
 void WhTool_ModSettingsChanged() {
     LoadUserIconsAndSettings();
+    LoadDeviceSelections();
     if (g_trayHwnd) PostMessageW(g_trayHwnd, WM_UPDATE_TRAY_STATE, 0, 0);
 }
 
@@ -315,6 +574,8 @@ void WhTool_ModUninit() {
     if (g_workerThread) { WaitForSingleObject(g_workerThread, 2000); CloseHandle(g_workerThread); g_workerThread = nullptr; }
     if (g_iconDev1) { DestroyIcon(g_iconDev1); g_iconDev1 = nullptr; }
     if (g_iconDev2) { DestroyIcon(g_iconDev2); g_iconDev2 = nullptr; }
+    if (g_hWindHawkIcon) { DestroyIcon(g_hWindHawkIcon); g_hWindHawkIcon = nullptr; }
+    if (g_hWindHawkBmp) { DeleteObject(g_hWindHawkBmp); g_hWindHawkBmp = nullptr; }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
